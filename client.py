@@ -5,7 +5,10 @@ import random
 import threading
 import subprocess
 import sctp
-from project_messages_pb2 import conn_req, conn_resp, netstat_req, netstat_resp, netstat_data, netmeas_req, netmeas_resp, netmeas_data, hello
+from project_messages_pb2 import (
+    conn_req, conn_resp, netstat_req, netstat_resp, netstat_data,
+    netmeas_req, netmeas_resp, netmeas_data, hello
+)
 
 # Constants
 tcp_server_ip = "10.64.45.4"
@@ -14,6 +17,7 @@ sctp_server_ip = "127.0.0.1"
 sctp_server_port = 54322
 team_id = 5  # Your team ID
 
+# Helper Functions
 def send_message(client_socket, message):
     serialized_data = message.SerializeToString()
     client_socket.send(len(serialized_data).to_bytes(4, 'big'))
@@ -33,6 +37,7 @@ def receive_message(client_socket, message_type):
         print(f"[TIMEOUT] No response received for {message_type.__name__}")
         return None
 
+# Protocol Handlers
 def send_conn_req(client_socket):
     message = conn_req()
     message.header.id = team_id
@@ -76,9 +81,10 @@ def send_netmeas_report(client_socket, bandwidth):
 
 def run_iperf3(server_ip, port, interval):
     try:
-        result = subprocess.run([
-            "iperf3", "-c", server_ip, "-p", str(port), "-t", str(interval), "--json"
-        ], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ["iperf3", "-c", server_ip, "-p", str(port), "-t", str(interval), "--json"],
+            capture_output=True, text=True, check=True
+        )
         print("iperf3 output:", result.stdout)
         import json
         iperf_data = json.loads(result.stdout)
@@ -89,33 +95,44 @@ def run_iperf3(server_ip, port, interval):
         print("[IPERF3 ERROR]:", e.stderr)
         return 0
 
+# TCP Communication
 def tcp_communication():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_client:
-        tcp_client.settimeout(30)  # Increased timeout for debugging
-        print("[TCP] Connecting to server...")
-        tcp_client.connect((tcp_server_ip, tcp_server_port))
-        print("[TCP] Connected.")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_client:
+            tcp_client.settimeout(60)  # Αυξήστε το timeout
+            print("[TCP] Connecting to server...")
+            tcp_client.connect((tcp_server_ip, tcp_server_port))
+            print("[TCP] Connected.")
 
-        send_conn_req(tcp_client)
-        conn_response = handle_conn_resp(tcp_client)
-        if not conn_response:
-            return
+            send_conn_req(tcp_client)
+            conn_response = handle_conn_resp(tcp_client)
+            if not conn_response:
+                print("[TCP] Connection response not received.")
+                return
 
-        send_netstat_req(tcp_client)
-        netstat_response = handle_netstat_resp(tcp_client)
-        if not netstat_response:
-            return
+            send_netstat_req(tcp_client)
+            netstat_response = handle_netstat_resp(tcp_client)
+            if not netstat_response:
+                print("[TCP] Netstat response not received.")
+                return
 
-        send_netstat_data(tcp_client)
+            send_netstat_data(tcp_client)
 
-        send_netmeas_req(tcp_client)
-        netmeas_response = handle_netmeas_resp(tcp_client)
-        if not netmeas_response:
-            return
+            send_netmeas_req(tcp_client)
+            netmeas_response = handle_netmeas_resp(tcp_client)
+            if not netmeas_response:
+                print("[TCP] Netmeas response not received.")
+                return
 
-        bandwidth = run_iperf3(tcp_server_ip, netmeas_response.port, netmeas_response.interval)
-        send_netmeas_report(tcp_client, bandwidth)
+            bandwidth = run_iperf3(tcp_server_ip, netmeas_response.port, netmeas_response.interval)
+            send_netmeas_report(tcp_client, bandwidth)
 
+    except TimeoutError:
+        print("[TCP ERROR] Connection timed out.")
+    except Exception as e:
+        print(f"[TCP ERROR] {e}")
+
+# SCTP Communication
 def send_hello_messages():
     sctp_client = sctp.sctpsocket_tcp(socket.AF_INET)
     try:
@@ -123,10 +140,10 @@ def send_hello_messages():
         sctp_client.connect((sctp_server_ip, sctp_server_port))
         print("[SCTP] Connected.")
 
-        while True:
+        for _ in range(5):  # Περιορίστε τον αριθμό των HELLO μηνυμάτων
             hello_msg = hello()
             hello_msg.header.id = team_id
-            hello_msg.header.type = 1  # Explicitly setting the type for HELLO
+            hello_msg.header.type = 0  # ECE441_HELLO
             serialized_data = hello_msg.SerializeToString()
             sctp_client.send(len(serialized_data).to_bytes(4, 'big') + serialized_data)
             print(f"[SEND] HELLO: {hello_msg}")
@@ -139,8 +156,7 @@ def send_hello_messages():
 def sctp_communication():
     threading.Thread(target=send_hello_messages, daemon=True).start()
 
+# Main Function
 if __name__ == "__main__":
     threading.Thread(target=tcp_communication).start()
     sctp_communication()
-
-
