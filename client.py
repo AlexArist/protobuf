@@ -1,162 +1,181 @@
 import socket
-import struct
 import time
-import random
+import struct
 import threading
 import subprocess
-import sctp
-from project_messages_pb2 import (
-    conn_req, conn_resp, netstat_req, netstat_resp, netstat_data,
-    netmeas_req, netmeas_resp, netmeas_data, hello
-)
+import json
+import logging
+from sctp import sctpsocket_tcp
+import project_messages_pb2 as pb
 
-# Constants
-tcp_server_ip = "10.64.45.4"
-tcp_server_port = 65432
-sctp_server_ip = "127.0.0.1"
-sctp_server_port = 54322
-team_id = 5  # Your team ID
+# Configure Logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("Client")
 
-# Helper Functions
-def send_message(client_socket, message):
-    serialized_data = message.SerializeToString()
-    client_socket.send(len(serialized_data).to_bytes(4, 'big'))
-    client_socket.sendall(serialized_data)
-    message_name = type(message).__name__
-    print(f"[SEND] {message_name}: {message}")
+TEAM_ID = 5
+TCP_IP = "10.64.45.4"
+SCTP_IP = "127.0.0.1"
+TCP_PORT = 65432
+SCTP_PORT = 54322
 
-def receive_message(client_socket, message_type):
+# Sender and Receiver methods
+def send_msg(sock, msg):
     try:
-        data_length = int.from_bytes(client_socket.recv(4), 'big')
-        data = client_socket.recv(data_length)
-        message = message_type()
-        message.ParseFromString(data)
-        print(f"[RECEIVE] {message_type.__name__}: {message}")
-        return message
-    except socket.timeout:
-        print(f"[TIMEOUT] No response received for {message_type.__name__}")
+        data = msg.SerializeToString()
+        length = len(data)
+        sock.sendall(length.to_bytes(4, 'big'))
+        sock.sendall(data)
+        logger.info(f"Sent message: {msg}")
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
+
+def receive_msg(sock):
+    try:
+        length_data = sock.recv(4)
+        if not length_data:
+            raise ConnectionError("Socket closed by server.")
+        length = int.from_bytes(length_data, 'big')
+        data = sock.recv(length)
+        wrapper = pb.project_msg()
+        wrapper.ParseFromString(data)
+
+        # Return the content based on the message type
+        if wrapper.HasField("conn_resp_msg"):
+            return wrapper.conn_resp_msg
+        elif wrapper.HasField("netstat_resp_msg"):
+            return wrapper.netstat_resp_msg
+        elif wrapper.HasField("netmeas_resp_msg"):
+            return wrapper.netmeas_resp_msg
+        elif wrapper.HasField("netmeas_data_ack_msg"):
+            return wrapper.netmeas_data_ack_msg
+        else:
+            logger.warning("Unknown message type received.")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to receive message: {e}")
         return None
 
-# Protocol Handlers
-def send_conn_req(client_socket):
-    message = conn_req()
-    message.header.id = team_id
-    student = message.student.add()
-    student.aem = 2572
-    student.name = "Daniil Mavroudis"
-    student.email = "example@domain.com"
-    send_message(client_socket, message)
+# Message Creation Handlers
+def create_conn_req_msg(student_details):
+    header = pb.ece441_header()
+    header.id = TEAM_ID
+    header.type = pb.ECE441_CONN_REQ
+    conn_req = pb.conn_req()
+    conn_req.header.CopyFrom(header)
+    for student in student_details:
+        person = conn_req.student.add()
+        person.aem = student['aem']
+        person.name = student['name']
+        person.email = student['email']
+    wrapper = pb.project_msg()
+    wrapper.conn_req_msg.CopyFrom(conn_req)
+    return wrapper
 
-def handle_conn_resp(client_socket):
-    return receive_message(client_socket, conn_resp)
+def create_hello_msg():
+    header = pb.ece441_header()
+    header.id = TEAM_ID
+    header.type = pb.ECE441_HELLO
+    hello_msg = pb.hello()
+    hello_msg.header.CopyFrom(header)
+    wrapper = pb.project_msg()
+    wrapper.hello_msg.CopyFrom(hello_msg)
+    return wrapper
 
-def send_netstat_req(client_socket):
-    message = netstat_req()
-    message.header.id = team_id
-    send_message(client_socket, message)
+def create_netstat_req_msg(student_details):
+    header = pb.ece441_header()
+    header.id = TEAM_ID
+    header.type = pb.ECE441_NETSTAT_REQ
+    netstat_req = pb.netstat_req()
+    netstat_req.header.CopyFrom(header)
+    for student in student_details:
+        person = netstat_req.student.add()
+        person.aem = student['aem']
+        person.name = student['name']
+        person.email = student['email']
+    wrapper = pb.project_msg()
+    wrapper.netstat_req_msg.CopyFrom(netstat_req)
+    return wrapper
 
-def handle_netstat_resp(client_socket):
-    return receive_message(client_socket, netstat_resp)
+def create_netmeas_data_msg(report):
+    header = pb.ece441_header()
+    header.id = TEAM_ID
+    header.type = pb.ECE441_NETMEAS_DATA
+    netmeas_data = pb.netmeas_data()
+    netmeas_data.header.CopyFrom(header)
+    netmeas_data.report = report
+    wrapper = pb.project_msg()
+    wrapper.netmeas_data_msg.CopyFrom(netmeas_data)
+    return wrapper
 
-def send_netstat_data(client_socket):
-    message = netstat_data()
-    message.header.id = team_id
-    message.ip_address = "192.168.1.1"
-    message.mac_address = "00:1A:2B:3C:4D:5E"
-    send_message(client_socket, message)
+# HELLO Thread Handler
+def hello_thread(sctp_sock, interval):
+    last_send_time = 0
+    while True:
+        now = time.time()
+        if now - last_send_time >= interval:
+            hello_message = create_hello_msg()
+            send_msg(sctp_sock, hello_message)
+            logger.info("[HELLO] Sent HELLO message.")
+            last_send_time = now
+        time.sleep(0.3)
 
-def send_netmeas_req(client_socket):
-    message = netmeas_req()
-    message.header.id = team_id
-    send_message(client_socket, message)
-
-def handle_netmeas_resp(client_socket):
-    return receive_message(client_socket, netmeas_resp)
-
-def send_netmeas_report(client_socket, bandwidth):
-    message = netmeas_data()
-    message.header.id = team_id
-    message.report = bandwidth
-    send_message(client_socket, message)
-
-def run_iperf3(server_ip, port, interval):
+# Main Execution
+if __name__ == "__main__":
     try:
+        # TCP Connection
+        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        tcp_sock.connect((TCP_IP, TCP_PORT))
+        logger.info("[TCP] Connected.")
+
+        students = [
+            {"aem": 2572, "name": "Daniil Mavroudis", "email": "dmavroudis@uth.com"},
+            {"aem": 2497, "name": "Konstantinos Vakalis", "email": "kvakalis@uth.com"},
+            {"aem": 1414, "name": "Alexandros Aristeidou", "email": "aristeid@uth.com"},
+            {"aem": 9494, "name": "Dimitris Revithis", "email": "drevithis@uth.com"}
+        ]
+
+        # CONN_REQ and CONN_RESP
+        conn_req_message = create_conn_req_msg(students)
+        send_msg(tcp_sock, conn_req_message)
+        conn_resp_message = receive_msg(tcp_sock)
+        if conn_resp_message is None:
+            raise ValueError("No response for CONN_REQ.")
+        interval = conn_resp_message.interval
+        logger.info(f"[CONN_RESP] Received interval: {interval}.")
+
+        # SCTP Connection
+        sctp_sock = sctpsocket_tcp(socket.AF_INET)
+        sctp_sock.connect((SCTP_IP, SCTP_PORT))
+        logger.info("[SCTP] Connected.")
+
+        # Start HELLO Thread
+        threading.Thread(target=hello_thread, args=(sctp_sock, interval), daemon=True).start()
+
+        # NETSTAT_REQ and NETSTAT_RESP
+        netstat_req_message = create_netstat_req_msg(students)
+        send_msg(tcp_sock, netstat_req_message)
+        netstat_resp_message = receive_msg(tcp_sock)
+        logger.info("[NETSTAT_RESP] Received NETSTAT response.")
+
+        # iperf3 Throughput Test
         result = subprocess.run(
-            ["iperf3", "-c", server_ip, "-p", str(port), "-t", str(interval), "--json"],
+            ["iperf3", "-c", TCP_IP, "-p", str(5201), "-t", str(interval), "--json"],
             capture_output=True, text=True, check=True
         )
-        print("iperf3 output:", result.stdout)
-        import json
-        iperf_data = json.loads(result.stdout)
-        bandwidth = iperf_data['end']['sum_received']['bits_per_second'] / 1e6  # Mbps
-        print(f"[IPERF3] Bandwidth: {bandwidth} Mbps")
-        return bandwidth
-    except subprocess.CalledProcessError as e:
-        print("[IPERF3 ERROR]:", e.stderr)
-        return 0
+        bandwidth = json.loads(result.stdout)['end']['sum_received']['bits_per_second'] / 1e6
+        logger.info(f"[IPERF3] Bandwidth: {bandwidth:.2f} Mbps.")
 
-# TCP Communication
-def tcp_communication():
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_client:
-            tcp_client.settimeout(60)  # Αυξήστε το timeout
-            print("[TCP] Connecting to server...")
-            tcp_client.connect((tcp_server_ip, tcp_server_port))
-            print("[TCP] Connected.")
+        # NETMEAS_DATA and NETMEAS_DATA_ACK
+        netmeas_data_message = create_netmeas_data_msg(bandwidth)
+        send_msg(tcp_sock, netmeas_data_message)
+        netmeas_data_ack_message = receive_msg(tcp_sock)
+        logger.info("[NETMEAS_DATA_ACK] Received NETMEAS data acknowledgment.")
 
-            send_conn_req(tcp_client)
-            conn_response = handle_conn_resp(tcp_client)
-            if not conn_response:
-                print("[TCP] Connection response not received.")
-                return
-
-            send_netstat_req(tcp_client)
-            netstat_response = handle_netstat_resp(tcp_client)
-            if not netstat_response:
-                print("[TCP] Netstat response not received.")
-                return
-
-            send_netstat_data(tcp_client)
-
-            send_netmeas_req(tcp_client)
-            netmeas_response = handle_netmeas_resp(tcp_client)
-            if not netmeas_response:
-                print("[TCP] Netmeas response not received.")
-                return
-
-            bandwidth = run_iperf3(tcp_server_ip, netmeas_response.port, netmeas_response.interval)
-            send_netmeas_report(tcp_client, bandwidth)
-
-    except TimeoutError:
-        print("[TCP ERROR] Connection timed out.")
     except Exception as e:
-        print(f"[TCP ERROR] {e}")
+        logger.error(f"Error occurred: {e}")
 
-# SCTP Communication
-def send_hello_messages():
-    sctp_client = sctp.sctpsocket_tcp(socket.AF_INET)
-    try:
-        print("[SCTP] Connecting to server...")
-        sctp_client.connect((sctp_server_ip, sctp_server_port))
-        print("[SCTP] Connected.")
-
-        for _ in range(5):  # Περιορίστε τον αριθμό των HELLO μηνυμάτων
-            hello_msg = hello()
-            hello_msg.header.id = team_id
-            hello_msg.header.type = 0  # ECE441_HELLO
-            serialized_data = hello_msg.SerializeToString()
-            sctp_client.send(len(serialized_data).to_bytes(4, 'big') + serialized_data)
-            print(f"[SEND] HELLO: {hello_msg}")
-            time.sleep(random.randint(5, 10))
-    except Exception as e:
-        print(f"[SCTP ERROR] {e}")
     finally:
-        sctp_client.close()
-
-def sctp_communication():
-    threading.Thread(target=send_hello_messages, daemon=True).start()
-
-# Main Function
-if __name__ == "__main__":
-    threading.Thread(target=tcp_communication).start()
-    sctp_communication()
+        # Cleanup
+        tcp_sock.close()
+        sctp_sock.close()
+        logger.info("All connections closed.")
