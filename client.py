@@ -147,7 +147,7 @@ def hello_thread(sctp_sock, interval):
         # Send HELLO message
         hello_message = new_hello_msg()
         send_msg(sctp_sock, hello_message)
-        print("[HELLO] Sent HELLO message.")
+        print("[HELLO] Send HELLO message to server.")
 
         # Try to receive a HELLO message from the server after sending
         try:
@@ -213,6 +213,9 @@ if __name__ == "__main__":
         "iperf3", "-c", TCP_IP, "-p", str(port), "-t", str(interval)
     ], capture_output=True, text=True)
 
+    stop_hello.set()
+    thrd.join()
+
     # Extract bandwidth from standard output using regex
     match = re.search(r'(\d+.\d+)\s+Mbits/sec', result.stdout)
     if match:
@@ -227,8 +230,8 @@ if __name__ == "__main__":
     netmeas_data_ack_message = receive_msg(tcp_sock)
     print("[NETMEAS_DATA_ACK] Received NETMEAS data acknowledgment.")
 
-    stop_hello.set()
-    thrd.join()
+
+
     # Cleanup
     sctp_sock.close()
     tcp_sock.close()
